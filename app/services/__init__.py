@@ -1,1 +1,1 @@
-"""Service layer stubs for datasource, SQL guard, analysis runtime, charts, SSE."""
+"""Datasource access, SQL guard, model registry, charts, and the analysis runtime."""

@@ -10,6 +10,7 @@ class AnalysisChatRequest(BaseModel):
     question: str
     table_names: list[str] = Field(default_factory=list, alias="tableNames")
     model_id: str | None = Field(default=None, alias="modelId")
+    conversation_id: str | None = Field(default=None, alias="conversationId")
 
     model_config = {"populate_by_name": True}
 

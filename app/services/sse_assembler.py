@@ -222,5 +222,27 @@ def timeout_event(code: str = "TIMEOUT", message: str = "timeout", *, chunk_id: 
     )
 
 
+def message_start(fields: dict[str, Any] | None = None, *, chunk_id: str | None = None) -> str:
+    return format_sse_data(
+        build_chunk(EVENT_MESSAGE_START, event_fields=fields or None, chunk_id=chunk_id)
+    )
+
+
+def log_delta(text: str, *, chunk_id: str | None = None) -> str:
+    return format_sse_data(build_chunk(EVENT_LOG_DELTA, content=text, chunk_id=chunk_id))
+
+
+def message_completed(content: str | None = None, *, chunk_id: str | None = None) -> str:
+    return format_sse_data(
+        build_chunk(EVENT_MESSAGE_COMPLETED, content=content, chunk_id=chunk_id)
+    )
+
+
+def message_stop(*, chunk_id: str | None = None) -> str:
+    return format_sse_data(
+        build_chunk(EVENT_MESSAGE_STOP, finish_reason="stop", chunk_id=chunk_id)
+    )
+
+
 def done() -> str:
     return format_sse_data(DONE_SENTINEL)
