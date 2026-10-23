@@ -48,7 +48,29 @@ class DatasourceOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DatasourceTestRequest(BaseModel):
+    """Connection fields for POST /datasources/test (nothing is persisted)."""
+
+    db_type: str
+    host: str = ""
+    port: int | None = None
+    database: str = ""
+    username: str = ""
+    password: str = ""
+    jdbc_url: str | None = None
+    name: str = ""
+
+
 class DatasourceTestResult(BaseModel):
     ok: bool
     message: str = ""
     latency_ms: int | None = None
+
+
+class ReadOnlyQueryRequest(BaseModel):
+    """Internal read-only query the analysis runtime will call later."""
+
+    sql: str
+    tables: list[str] | None = None
+    max_rows: int | None = Field(default=None, ge=1)
+    timeout_seconds: int | None = Field(default=None, ge=1)

@@ -30,7 +30,24 @@ class AnalysisRuntime:
         yield sse.message_delta("AskData analysis runtime is not implemented yet.\n")
         yield sse.done()
 
-    async def catalog(self, datasource_id: str) -> dict[str, Any]:
+    async def execute_read_only_query(
+        self, service: Any, *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Delegate to DatasourceService.execute_read_only_query for the future tool loop."""
+        return await service.execute_read_only_query(*args, **kwargs)
+
+    async def catalog(self, datasource_id: str, structure: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return imported==true and enabled!=false tables from structure_json."""
-        _ = datasource_id
-        return {"datasourceId": datasource_id, "tables": []}
+        tables: list[dict[str, Any]] = []
+        for table in (structure or {}).get("tables") or []:
+            if table.get("imported", True) and table.get("enabled", True) is not False:
+                tables.append(
+                    {
+                        "name": table.get("name"),
+                        "comment": table.get("comment"),
+                        "imported": True,
+                        "enabled": True,
+                        "columns": table.get("columns"),
+                    }
+                )
+        return {"datasourceId": datasource_id, "tables": tables}
