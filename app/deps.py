@@ -1,12 +1,14 @@
-"""FastAPI dependencies: auth, settings, DB session placeholders."""
+"""FastAPI dependencies: auth, settings, DB session."""
 
-from collections.abc import AsyncGenerator
 from typing import Annotated
 
 from fastapi import Depends, Header
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
+from app.db.session import get_db
 from app.security.api_key import verify_api_key
+from app.services.datasource_service import DatasourceService
 
 
 async def require_api_key(
@@ -27,7 +29,7 @@ async def require_api_key(
     verify_api_key(provided, settings.api_key)
 
 
-# Placeholder: wire SQLAlchemy AsyncSession later
-async def get_db() -> AsyncGenerator[None, None]:
-    """Yield a DB session once models/engine are wired."""
-    yield None
+def get_datasource_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> DatasourceService:
+    return DatasourceService(session)

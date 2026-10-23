@@ -1,24 +1,32 @@
 """智能问数: catalog + SSE chat/stream."""
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
-from app.deps import require_api_key
+from app.deps import get_datasource_service, require_api_key
 from app.schemas.analysis import AnalysisChatRequest
 from app.schemas.common import success
-from app.services.analysis_runtime import AnalysisRuntime
 from app.services import sse_assembler as sse
+from app.services.analysis_runtime import AnalysisRuntime
+from app.services.datasource_service import DatasourceNotFoundError, DatasourceService
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
 _runtime = AnalysisRuntime()
 
 
 @router.get("/catalog")
-async def catalog(datasource_id: str = Query(..., alias="datasourceId")) -> dict[str, Any]:
-    data = await _runtime.catalog(datasource_id)
+async def catalog(
+    svc: Annotated[DatasourceService, Depends(get_datasource_service)],
+    datasource_id: str = Query(..., alias="datasourceId"),
+) -> dict[str, Any]:
+    try:
+        structure = await svc.get_structure(datasource_id)
+    except DatasourceNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="datasource not found") from None
+    data = await _runtime.catalog(datasource_id, structure)
     return success(data)
 
 
