@@ -69,7 +69,16 @@ export const DB_TYPES = [
   { label: 'MySQL', value: 'mysql' },
   { label: 'MariaDB', value: 'mariadb' },
   { label: 'PostgreSQL', value: 'postgres' },
+  { label: 'Oracle', value: 'oracle' },
+  { label: 'SQL Server', value: 'sqlserver' },
 ]
+
+export function databasePlaceholder(dbType: string): string {
+  if (dbType === 'sqlite') return 'SQLite 文件路径，例如 /tmp/askdata-orders.db'
+  if (dbType === 'oracle') return 'Oracle 服务名，例如 FREEPDB1'
+  if (dbType === 'sqlserver') return 'SQL Server 数据库名'
+  return '库名'
+}
 
 export function listDatasources() {
   return request<Datasource[]>('/api/v1/datasources')

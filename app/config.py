@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     sql_max_rows: int = 200
     sql_timeout_seconds: int = 30
     analysis_timeout_seconds: int = 120
+    # Fernet key for datasource passwords and model api keys. Empty falls back
+    # to a key derived from API_KEY. SECRET_ENCRYPTION_KEY is an alias.
+    askdata_secret_key: str = ""
+    secret_encryption_key: str = ""
+    # Prior turns replayed into the model for the same conversation.
+    conversation_max_messages: int = 12
+    conversation_max_chars: int = 12000
 
     @property
     def cors_origin_list(self) -> list[str]:

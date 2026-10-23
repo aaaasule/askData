@@ -27,6 +27,9 @@ class ScriptedLLM:
         self.seen: list[dict] = []
 
     async def stream(self, **kwargs: object):
+        messages = kwargs.get("messages")
+        if isinstance(messages, list):
+            kwargs = {**kwargs, "messages": [dict(item) for item in messages]}
         self.seen.append(kwargs)
         events = self.rounds.pop(0) if self.rounds else [{"kind": "content", "text": "完成"}]
         for event in events:

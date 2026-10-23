@@ -52,6 +52,15 @@ pip install -e ".[db]"
 alembic upgrade head
 ```
 
+被问数的业务库还可以是 Oracle 或 SQL Server。这两个驱动不在默认安装和 `askdata[db]` 里，避免把厚依赖带进只跑 SQLite 的环境：
+
+```bash
+pip install -e ".[db-oracle]"   # python-oracledb
+pip install -e ".[db-mssql]"    # aioodbc + pyodbc，还需要本机 ODBC Driver 18
+```
+
+连接字段与 `aigc_datasource` 一致：`host`、`port`、`database`、`username`、`password`、`jdbc_url`、`db_type`（`oracle` 或 `sqlserver` / `mssql`）。URL 形状对齐 LangChat `DatasourceType`：Oracle 的 `database` 是服务名，对应 `jdbc:oracle:thin:@//host:1521/service`；SQL Server 默认 `jdbc:sqlserver://host:1433;encrypt=false;trustServerCertificate=true;databaseName=...`。没装驱动时，探测和查询会直接返回安装提示，不会去连库。CI 不要求有真实的 Oracle 或 SQL Server。
+
 - 健康检查：`GET /health`
 - OpenAPI：`http://127.0.0.1:8000/docs`
 - API 前缀：`/api/v1`
@@ -71,15 +80,24 @@ curl -s -H "Authorization: Bearer change-me" \
 - ` POST /api/v1/datasources/{id}/query` — 只读 SQL（`sql_guard`：仅 SELECT/WITH、表白名单、最多约 200 行、超时约 30 秒）
 - ` GET /api/v1/core/data-analysis/catalog?datasourceId=` — 已授权表（`structureJson` 里 imported 且 enabled）
 - ` POST /api/v1/core/data-analysis/chat/stream` — NL→SQL，OpenAI 兼容工具循环，SSE
+- ` GET /api/v1/core/data-analysis/conversations/{id}` — 会话元数据
+- ` GET /api/v1/core/data-analysis/conversations/{id}/messages` — 已保存的问答
+- ` DELETE /api/v1/core/data-analysis/conversations/{id}` — 清空该会话
 - ` /api/v1/aigc/models` — 轻量模型 CRUD。列表和详情里的 `api_key` 为掩码
 
-`conversationId` 会回显在 `message.start` 里，本服务不保存会话。
+`conversationId` 会回显在 `message.start` 里。客户端没传时服务端创建，并按「同一会话 + 同一数据源」保存问答。下一轮把此前的 user/assistant 放进模型上下文，条数和字符数分别受 `CONVERSATION_MAX_MESSAGES`（默认 12）和 `CONVERSATION_MAX_CHARS`（默认 12000）限制。换一个 `conversationId`，或会话属于别的数据源 / 别的模型，历史不会混进来。SSE 仍然只是 `data:` 行，不包 `{code,message,data}`。问数页把 id 存在 `localStorage`（`askdata.conversation.<datasourceId>`），「新对话」会清掉它。
 
 ## 安全
 
 问数工具 `query_data` 仍然走 `sql_guard`：只允许单条 SELECT/WITH，表必须在本次 `tableNames`（为空则用目录里已授权的表）与 `structureJson` 的交集里，行数和超时沿用 `SQL_MAX_ROWS` / `SQL_TIMEOUT_SECONDS`。
 
-**明文 TODO：** 数据源 `password` 和模型 `api_key` 仍以明文写入应用库（`aigc_datasource.password`、`aigc_model.api_key`）。响应不返回 password，模型密钥只返回掩码（例如 `sk-****1234`）。本版本没有加密落库，生产前需要补上。
+数据源 `password` 和模型 `api_key` 写入应用库前用 Fernet 加密（列里是 `enc:v1:` 开头的密文，不改表结构以外的字段含义；密文比明文长，所以这两列在迁移里放宽成 `TEXT`）。响应不返回 password，模型密钥只返回掩码（例如 `sk-****1234`）。密钥来自 `ASKDATA_SECRET_KEY`，也认 `SECRET_ENCRYPTION_KEY`。生成方式：
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+两个变量都空着时，用 `API_KEY` 派生一把稳定的密钥，这样已有的 Mac 演示库不用先配新变量。没有 `enc:v1:` 前缀的旧明文会在下次读取时加密写回。轮换密钥之后，旧密文解不开，需要用原来的密钥把每条数据源和模型重新保存一遍；服务不会批量重加密。
 
 服务鉴权使用环境变量 `API_KEY`（`Authorization: Bearer` 或 `X-API-Key`）。未传 `modelId` 时，优先用最近更新的已启用模型；都没有时用 `DEFAULT_MODEL_BASE_URL`、`DEFAULT_MODEL_API_KEY`、`DEFAULT_MODEL_NAME`。`base_url` / `endpoint` 填 OpenAI 兼容前缀，一般以 `/v1` 结尾。
 
@@ -214,8 +232,8 @@ pytest
 
 ## 下一步
 
-1. 生产前加密数据源口令和模型 api_key
-2. Oracle / SQL Server 驱动与内省（当前只保证 sqlite、mysql/mariadb、postgres）
-3. 服务端多轮会话历史（现在 `conversationId` 只在 `message.start` 回显）
+1. 密钥轮换时的批量重加密（现在要逐条重新保存）
+2. 把工具调用和结果表也放进会话历史（现在只存用户问题和助手正文）
+3. 在带真实 Oracle / SQL Server 的环境里做一次端到端探活（CI 只用模拟连接）
 
 可回看选型页（Cursor Page）：调研问数独立服务选型与骨架。

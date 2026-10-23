@@ -16,6 +16,7 @@ import {
   createDatasource,
   datasourceLocation,
   DB_TYPES,
+  databasePlaceholder,
   deleteDatasource,
   listDatasources,
   testDatasource,
@@ -219,7 +220,7 @@ onMounted(load)
           数据库
           <NInput
             v-model:value="form.database"
-            :placeholder="form.db_type === 'sqlite' ? 'SQLite 文件路径，例如 /tmp/askdata-orders.db' : '库名'"
+            :placeholder="databasePlaceholder(form.db_type)"
           />
         </label>
         <label>用户名<NInput v-model:value="form.username" /></label>
@@ -234,7 +235,10 @@ onMounted(load)
         </label>
         <label class="span-2">
           JDBC / SQLAlchemy URL（可选，主机和数据库都空时才使用）
-          <NInput v-model:value="form.jdbc_url" placeholder="例如 sqlite:////tmp/askdata-orders.db" />
+          <NInput
+            v-model:value="form.jdbc_url"
+            placeholder="可选。例如 jdbc:oracle:thin:@//host:1521/FREEPDB1"
+          />
         </label>
       </div>
       <div class="modal-actions">

@@ -14,7 +14,7 @@ from sqlglot.errors import SqlglotError
 DEFAULT_MAX_ROWS = 200
 DEFAULT_TIMEOUT_SECONDS = 30
 
-_PARSE_DIALECTS: tuple[str | None, ...] = ("sqlite", "mysql", "postgres", None)
+_PARSE_DIALECTS: tuple[str | None, ...] = ("sqlite", "mysql", "postgres", "oracle", "tsql", None)
 
 _READ_TYPES = (exp.Select, exp.Union, exp.Intersect, exp.Except)
 
@@ -50,7 +50,31 @@ _DANGEROUS_FUNCS = {
     "sleep",
     "pg_sleep",
     "benchmark",
+    "utl_http",
+    "utl_file",
+    "utl_inaddr",
+    "utl_tcp",
+    "dbms_scheduler",
+    "dbms_java",
+    "xp_cmdshell",
+    "openrowset",
+    "opendatasource",
+    "openquery",
 }
+
+# Package calls such as UTL_HTTP.REQUEST often parse as a plain function name.
+_DANGEROUS_SNIPPETS = (
+    "utl_http",
+    "utl_file",
+    "utl_inaddr",
+    "utl_tcp",
+    "dbms_scheduler",
+    "dbms_java",
+    "xp_cmdshell",
+    "openrowset",
+    "opendatasource",
+    "openquery",
+)
 
 
 class SqlGuardError(ValueError):
@@ -172,6 +196,10 @@ def _unwrap(expression: exp.Expression) -> exp.Expression:
 def _assert_read_expression(expression: exp.Expression) -> None:
     if not isinstance(expression, _READ_TYPES):
         raise SqlGuardError("only SELECT/WITH queries are allowed")
+    rendered = expression.sql().lower()
+    for snippet in _DANGEROUS_SNIPPETS:
+        if snippet in rendered:
+            raise SqlGuardError(f"function {snippet} is not allowed")
     for node in expression.walk():
         if isinstance(node, _FORBIDDEN_NODES):
             raise SqlGuardError("write or administrative statements are not allowed")

@@ -7,6 +7,8 @@ import sqlite3
 
 from httpx import AsyncClient
 
+from app.security.secrets import open_secret
+
 
 def _headers() -> dict[str, str]:
     return {"X-API-Key": "test-key"}
@@ -85,7 +87,9 @@ async def test_put_structure_accepts_langchat_json_string(client: AsyncClient, a
     assert item["database"] == "/tmp/orders.db"
     assert item["username"] == "reader"
     assert "password" not in item
-    assert _stored_password(app_home, datasource_id) == "s3cret"
+    stored_password = _stored_password(app_home, datasource_id)
+    assert stored_password != "s3cret"
+    assert open_secret(stored_password)[0] == "s3cret"
 
     catalog = await client.get(
         "/api/v1/core/data-analysis/catalog",
