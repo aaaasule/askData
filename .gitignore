@@ -228,3 +228,5 @@ __pycache__/
 !.env.example
 *.db
 *.db-journal
+web/node_modules/
+web/dist/

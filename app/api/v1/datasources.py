@@ -1,5 +1,6 @@
 """Datasource CRUD, connection test, introspect, and read-only query."""
 
+import json
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -12,6 +13,7 @@ from app.schemas.datasource import (
     DatasourceTestRequest,
     DatasourceUpdate,
     ReadOnlyQueryRequest,
+    SaveStructureRequest,
 )
 from app.services.datasource_service import (
     DatasourceNotFoundError,
@@ -99,6 +101,21 @@ async def structure(datasource_id: str, svc: Svc) -> dict[str, Any]:
     return success(data)
 
 
+@router.put("/{datasource_id}/structure")
+async def save_structure(
+    datasource_id: str,
+    body: SaveStructureRequest,
+    svc: Svc,
+) -> dict[str, Any]:
+    """Persist imported/enabled table authorization without a full datasource update."""
+    parsed = _parse_structure(body.structure_json)
+    try:
+        saved = await svc.save_structure(datasource_id, parsed)
+    except DatasourceNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="datasource not found") from None
+    return success(saved)
+
+
 @router.post("/{datasource_id}/query")
 async def query_readonly(datasource_id: str, body: ReadOnlyQueryRequest, svc: Svc) -> dict[str, Any]:
     """Thin internal read-only entry. AnalysisRuntime calls the service method later."""
@@ -129,3 +146,29 @@ async def query_readonly(datasource_id: str, body: ReadOnlyQueryRequest, svc: Sv
     except (DatasourceDriverError, QueryExecutionError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
     return success(result)
+
+
+def _parse_structure(value: dict[str, Any] | str) -> dict[str, Any]:
+    """Accept LangChat's JSON string or an object. Reject anything that is not an object."""
+    if isinstance(value, str):
+        try:
+            parsed: Any = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="structureJson is not valid JSON",
+            ) from exc
+    else:
+        parsed = value
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="structure must be a JSON object",
+        )
+    tables = parsed.get("tables")
+    if tables is not None and not isinstance(tables, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="tables must be a list",
+        )
+    return parsed

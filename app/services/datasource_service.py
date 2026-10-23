@@ -114,6 +114,15 @@ class DatasourceService:
         row = await self._require(datasource_id)
         return row.structure_json
 
+    async def save_structure(self, datasource_id: str, structure: dict[str, Any]) -> dict[str, Any]:
+        """Replace structure_json only. Connection fields stay untouched."""
+        row = await self._require(datasource_id)
+        row.structure_json = structure
+        row.updated_at = datetime.now(UTC)
+        await self.session.commit()
+        await self.session.refresh(row)
+        return row.structure_json or {}
+
     async def execute_read_only_query(
         self,
         datasource_id: str,
