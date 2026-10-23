@@ -7,6 +7,8 @@ from pathlib import Path
 
 from httpx import AsyncClient
 
+from app.security.secrets import open_secret
+
 
 def _headers() -> dict[str, str]:
     return {"X-API-Key": "test-key"}
@@ -63,7 +65,10 @@ async def test_model_crud_masks_api_key(client: AsyncClient, app_home: Path) -> 
     assert "****" in item["api_key"]
     assert secret not in created.text
     model_id = item["id"]
-    assert _stored_key(app_home) == secret
+    stored = _stored_key(app_home)
+    assert stored != secret
+    assert stored.startswith("enc:v1:")
+    assert open_secret(stored)[0] == secret
 
     listed = await client.get("/api/v1/aigc/models", headers=_headers())
     assert secret not in listed.text
@@ -82,7 +87,7 @@ async def test_model_crud_masks_api_key(client: AsyncClient, app_home: Path) -> 
     assert echoed.status_code == 200
     assert echoed.json()["data"]["name"] == "已改名"
     assert secret not in echoed.text
-    assert _stored_key(app_home) == secret
+    assert _stored_key(app_home) == stored
 
     rotated = "sk-rotated-new-value"
     updated = await client.put(
@@ -92,7 +97,10 @@ async def test_model_crud_masks_api_key(client: AsyncClient, app_home: Path) -> 
     )
     assert rotated not in updated.text
     assert updated.json()["data"]["enabled"] is False
-    assert _stored_key(app_home) == rotated
+    rotated_stored = _stored_key(app_home)
+    assert rotated_stored != rotated
+    assert rotated_stored != stored
+    assert open_secret(rotated_stored)[0] == rotated
 
     missing = await client.get("/api/v1/aigc/models/missing", headers=_headers())
     assert missing.status_code == 404

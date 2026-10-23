@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import AigcModel
 from app.schemas.model import ModelOut
 from app.security.api_key import mask_api_key
+from app.security.secrets import open_secret, seal_secret
 
 _UPDATABLE = {
     "name",
@@ -41,13 +42,28 @@ class ModelService:
         result = await self.session.execute(
             select(AigcModel).order_by(AigcModel.created_at.desc(), AigcModel.id)
         )
-        return [_to_out(row) for row in result.scalars().all()]
+        rows = list(result.scalars().all())
+        migrated = False
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            plain, changed = _prepare_key(row)
+            migrated = migrated or changed
+            items.append(_to_out(row, plain))
+        if migrated:
+            await self.session.commit()
+            for row in rows:
+                await self.session.refresh(row)
+        return items
 
     async def get(self, model_id: str) -> dict[str, Any] | None:
         row = await self.session.get(AigcModel, model_id)
         if row is None:
             return None
-        return _to_out(row)
+        plain, changed = _prepare_key(row)
+        if changed:
+            await self.session.commit()
+            await self.session.refresh(row)
+        return _to_out(row, plain)
 
     async def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         row = AigcModel(
@@ -57,7 +73,7 @@ class ModelService:
             type=payload.get("type") or "chat",
             base_url=payload.get("base_url") or "",
             endpoint=payload.get("endpoint") or "",
-            api_key=payload.get("api_key") or "",
+            api_key=seal_secret(payload.get("api_key") or ""),
             temperature=payload.get("temperature", 0.2),
             top_p=payload.get("top_p"),
             max_token=payload.get("max_token"),
@@ -72,12 +88,13 @@ class ModelService:
 
     async def update(self, model_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         row = await self._require(model_id)
+        plain, _changed = _prepare_key(row)
         data = dict(payload)
         if "model" in data or "model_name" in data:
             renamed = _model_id(data)
             if renamed:
                 data["model"] = renamed
-        if "api_key" in data and _is_masked_echo(data.get("api_key"), row.api_key):
+        if "api_key" in data and _is_masked_echo(data.get("api_key"), plain):
             data.pop("api_key")
         for key, value in data.items():
             if key not in _UPDATABLE:
@@ -85,6 +102,9 @@ class ModelService:
             if key == "model":
                 if value:
                     row.model_name = str(value)
+                continue
+            if key == "api_key":
+                row.api_key = seal_secret("" if value is None else str(value))
                 continue
             setattr(row, key, value)
         row.updated_at = datetime.now(UTC)
@@ -118,7 +138,16 @@ def _is_masked_echo(submitted: Any, stored: str) -> bool:
     return text == mask_api_key(stored)
 
 
-def _to_out(row: AigcModel) -> dict[str, Any]:
+def _prepare_key(row: AigcModel) -> tuple[str, bool]:
+    plain, legacy = open_secret(row.api_key or "")
+    if legacy and row.api_key:
+        row.api_key = seal_secret(plain)
+        return plain, True
+    return plain, False
+
+
+def _to_out(row: AigcModel, api_key_plain: str | None = None) -> dict[str, Any]:
+    plain = api_key_plain if api_key_plain is not None else open_secret(row.api_key or "")[0]
     payload = ModelOut(
         id=row.id,
         name=row.name,
@@ -128,7 +157,7 @@ def _to_out(row: AigcModel) -> dict[str, Any]:
         type=row.type or "chat",
         base_url=row.base_url or "",
         endpoint=row.endpoint or "",
-        api_key=mask_api_key(row.api_key),
+        api_key=mask_api_key(plain),
         temperature=row.temperature,
         top_p=row.top_p,
         max_token=row.max_token,

@@ -101,3 +101,38 @@ def test_prepare_composes_checks() -> None:
         prepare_read_only_sql("DELETE FROM orders", {"orders"}, max_rows=50)
     with pytest.raises(SqlGuardError):
         prepare_read_only_sql("SELECT * FROM secrets", {"orders"}, max_rows=50)
+
+
+def test_oracle_and_tsql_limits_stay_read_only() -> None:
+    oracle = prepare_read_only_sql(
+        "SELECT id FROM orders",
+        {"orders"},
+        max_rows=5,
+        dialect="oracle",
+    )
+    assert "5" in oracle
+    assert "orders" in oracle.lower()
+    assert "fetch" in oracle.lower() or "rownum" in oracle.lower()
+
+    tsql = prepare_read_only_sql(
+        "SELECT id FROM orders",
+        {"orders"},
+        max_rows=5,
+        dialect="tsql",
+    )
+    assert "5" in tsql
+    assert "orders" in tsql.lower()
+    assert "top" in tsql.lower() or "fetch" in tsql.lower()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT UTL_HTTP.REQUEST('http://example') FROM dual",
+        "SELECT xp_cmdshell('whoami')",
+        "SELECT * FROM OPENROWSET('SQLNCLI', 'Server=x', 'SELECT 1')",
+    ],
+)
+def test_rejects_oracle_and_sqlserver_helpers(sql: str) -> None:
+    with pytest.raises(SqlGuardError):
+        assert_read_only(sql)

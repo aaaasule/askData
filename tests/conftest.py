@@ -33,8 +33,11 @@ def app_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", url)
     monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setenv("ASKDATA_SECRET_KEY", "test-secret-key-do-not-use")
     monkeypatch.setenv("SQL_MAX_ROWS", "200")
     monkeypatch.setenv("SQL_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("CONVERSATION_MAX_MESSAGES", "12")
+    monkeypatch.setenv("CONVERSATION_MAX_CHARS", "12000")
 
     from app.config import get_settings
 

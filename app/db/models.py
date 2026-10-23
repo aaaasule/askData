@@ -29,8 +29,8 @@ class AigcDatasource(Base):
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     database: Mapped[str] = mapped_column(String(128), default="")
     username: Mapped[str] = mapped_column(String(128), default="")
-    # TODO: encrypt at rest before production. Passwords are still plaintext.
-    password: Mapped[str] = mapped_column(String(512), default="")
+    # Fernet ciphertext (enc:v1:...). Legacy plaintext is rewritten on read.
+    password: Mapped[str] = mapped_column(Text, default="")
     jdbc_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     structure_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -55,8 +55,8 @@ class AigcModel(Base):
     type: Mapped[str] = mapped_column(String(32), default="chat", server_default="chat")
     base_url: Mapped[str] = mapped_column(String(512), default="")
     endpoint: Mapped[str] = mapped_column(String(512), default="")
-    # TODO: encrypt at rest before production. Keys are masked in API responses only.
-    api_key: Mapped[str] = mapped_column(String(512), default="")
+    # Fernet ciphertext (enc:v1:...). API responses only ever return a mask.
+    api_key: Mapped[str] = mapped_column(Text, default="")
     temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
     top_p: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_token: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -68,4 +68,35 @@ class AigcModel(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AigcConversation(Base):
+    """One analysis thread for a datasource, optionally pinned to a model."""
+
+    __tablename__ = "aigc_conversation"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    datasource_id: Mapped[str] = mapped_column(String(36), index=True)
+    model_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AigcMessage(Base):
+    """A single user or assistant turn inside a conversation."""
+
+    __tablename__ = "aigc_message"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    conversation_id: Mapped[str] = mapped_column(String(128), index=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )

@@ -15,6 +15,7 @@ from app.schemas.datasource import (
     ReadOnlyQueryRequest,
     SaveStructureRequest,
 )
+from app.security.secrets import SecretError
 from app.services.datasource_service import (
     DatasourceNotFoundError,
     DatasourceService,
@@ -87,7 +88,7 @@ async def introspect(datasource_id: str, svc: Svc) -> dict[str, Any]:
         structure = await svc.introspect(datasource_id)
     except DatasourceNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="datasource not found") from None
-    except (DatasourceDriverError, QueryExecutionError) as exc:
+    except (DatasourceDriverError, QueryExecutionError, SecretError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
     return success(structure)
 
@@ -143,7 +144,7 @@ async def query_readonly(datasource_id: str, body: ReadOnlyQueryRequest, svc: Sv
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
     except QueryTimeoutError as exc:
         raise HTTPException(status_code=status.HTTP_408_REQUEST_TIMEOUT, detail=str(exc)) from None
-    except (DatasourceDriverError, QueryExecutionError) as exc:
+    except (DatasourceDriverError, QueryExecutionError, SecretError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
     return success(result)
 

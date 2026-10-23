@@ -19,6 +19,7 @@ export type ParsedAnalysisEvent =
   | { type: 'tool'; name: string; phase: 'before' | 'executed'; status: string; failed: boolean }
   | { type: 'log'; content: string }
   | { type: 'error'; message: string }
+  | { type: 'start'; conversationId: string }
   | { type: 'done' }
   | { type: 'ignore' }
 
@@ -35,6 +36,8 @@ interface DeltaEvent {
   status?: unknown
   failed?: unknown
   message?: unknown
+  conversation_id?: unknown
+  conversationId?: unknown
 }
 
 export function parseSseBlock(block: string): ParsedAnalysisEvent | null {
@@ -95,6 +98,10 @@ export function parseSseBlock(block: string): ParsedAnalysisEvent | null {
       status: String(event?.status || ''),
       failed: Boolean(event?.failed),
     }
+  }
+  if (name === 'message.start') {
+    const conversationId = String(event?.conversation_id || event?.conversationId || '')
+    if (conversationId) return { type: 'start', conversationId }
   }
   if (name === 'error' || name === 'timeout') {
     return { type: 'error', message: String(event?.message || name) }

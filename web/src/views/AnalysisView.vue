@@ -2,7 +2,7 @@
 import { NButton, NEmpty, NSelect, NSpin } from 'naive-ui'
 import { computed, onMounted, ref } from 'vue'
 
-import { getCatalog, streamAnalysis, type CatalogTable } from '@/api/analysis'
+import { clearConversation, getCatalog, streamAnalysis, type CatalogTable } from '@/api/analysis'
 import { listDatasources, type Datasource } from '@/api/datasource'
 import { listModels, type ModelRecord } from '@/api/models'
 import ChartPanel from '@/components/ChartPanel.vue'
@@ -31,7 +31,29 @@ const modelId = ref('')
 const selectedTables = ref<string[]>([])
 const question = ref('每个客户的订单金额合计是多少？')
 const turns = ref<Turn[]>([])
+const conversationId = ref<string | null>(null)
 let abort: AbortController | null = null
+
+function conversationKey(id: string) {
+  return `askdata.conversation.${id}`
+}
+
+function readConversation(id: string): string | null {
+  try {
+    return localStorage.getItem(conversationKey(id))
+  } catch {
+    return null
+  }
+}
+
+function writeConversation(id: string, value: string | null) {
+  try {
+    if (value) localStorage.setItem(conversationKey(id), value)
+    else localStorage.removeItem(conversationKey(id))
+  } catch {
+    /* private mode */
+  }
+}
 
 const datasourceOptions = computed(() =>
   datasources.value.map((item) => ({ label: `${item.name} · ${item.db_type}`, value: item.id })),
@@ -52,6 +74,7 @@ async function loadBase() {
     models.value = modelRows
     if (!datasourceId.value && sourceRows[0]) {
       datasourceId.value = sourceRows[0].id
+      conversationId.value = readConversation(sourceRows[0].id)
       await loadCatalog()
     }
   } catch (error) {
@@ -63,6 +86,8 @@ async function loadBase() {
 
 function onDatasourceChange(id: string) {
   datasourceId.value = id
+  conversationId.value = readConversation(id)
+  turns.value = []
   void loadCatalog()
 }
 
@@ -83,6 +108,20 @@ function stop() {
   abort?.abort()
   abort = null
   asking.value = false
+}
+
+async function newConversation() {
+  const current = conversationId.value
+  const source = datasourceId.value
+  conversationId.value = null
+  turns.value = []
+  if (source) writeConversation(source, null)
+  if (!current) return
+  try {
+    await clearConversation(current)
+  } catch {
+    /* 服务端没有这轮会话时，本地清空就够了 */
+  }
 }
 
 async function ask() {
@@ -113,10 +152,13 @@ async function ask() {
         question: text,
         tableNames: selectedTables.value,
         modelId: modelId.value || null,
-        conversationId: null,
+        conversationId: conversationId.value,
       },
       (event) => {
-        if (event.type === 'text') turn.text += event.content
+        if (event.type === 'start') {
+          conversationId.value = event.conversationId
+          if (datasourceId.value) writeConversation(datasourceId.value, event.conversationId)
+        } else if (event.type === 'text') turn.text += event.content
         else if (event.type === 'log') turn.logs.push(event.content)
         else if (event.type === 'table') turn.tables.push(event.result)
         else if (event.type === 'chart') turn.charts.push(event.result)
@@ -148,7 +190,9 @@ onMounted(loadBase)
       <div>
         <p class="eyebrow">问数</p>
         <h1>用自然语言查已授权的表</h1>
-        <p class="lede">结果按 SSE 事件拆开：文本、表格和图表。服务端不保存多轮历史，本页只留这次打开的记录。</p>
+        <p class="lede">
+          结果按 SSE 事件拆开：文本、表格和图表。同一数据源会复用 conversationId，服务端把此前问答带进模型。
+        </p>
       </div>
     </header>
 
@@ -183,9 +227,18 @@ onMounted(loadBase)
             问题
             <textarea v-model="question" rows="4" />
           </label>
+          <p v-if="conversationId" class="muted">当前会话 {{ conversationId }}</p>
           <div class="row-actions">
             <NButton attr-type="submit" type="primary" :loading="asking" :disabled="!datasourceId">提问</NButton>
             <NButton v-if="asking" secondary @click="stop">停止</NButton>
+            <NButton
+              v-if="conversationId || turns.length"
+              secondary
+              :disabled="asking"
+              @click="newConversation"
+            >
+              新对话
+            </NButton>
           </div>
         </form>
 

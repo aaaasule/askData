@@ -1,34 +1,46 @@
 """Connect, introspect, and run guarded SQL against a datasource.
 
 SQLite uses the builtin aiosqlite driver. PostgreSQL and MySQL use SQLAlchemy
-plus asyncpg / aiomysql when `askdata[db]` is installed; otherwise the call
-fails with an explicit driver error before a connection is attempted.
+plus asyncpg / aiomysql when ``askdata[db]`` is installed. Oracle
+(``askdata[db-oracle]``, python-oracledb) and SQL Server
+(``askdata[db-mssql]``, aioodbc) follow the same path and fail with an
+explicit driver error before a connection is attempted.
+
+Oracle and SQL Server have no portable session-level ``READ ONLY`` that is
+safe to send before the first statement. Writes are still rejected by
+``sql_guard``, the transaction is rolled back, and the client timeout is
+applied when the driver exposes one.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import time
-from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import inspect, text
-from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-_POSTGRES = {"postgres", "postgresql"}
-_MYSQL = {"mysql", "mariadb"}
-_SQLITE = {"sqlite", "sqlite3"}
+from app.services.db_url import (
+    ConnInfo,
+    DatasourceDriverError,
+    apply_driver_timeout,
+    build_async_url,
+    dialect_name,
+    ensure_driver,
+    normalize_db_type,
+)
 
-
-class DatasourceDriverError(RuntimeError):
-    """The optional database driver for this db_type is not installed."""
+_POSTGRES = {"postgres"}
+_MYSQL = {"mysql"}
+_SQLITE = {"sqlite"}
+_ORACLE = {"oracle"}
+_SQLSERVER = {"sqlserver"}
 
 
 class QueryTimeoutError(TimeoutError):
@@ -39,62 +51,8 @@ class QueryExecutionError(RuntimeError):
     """The target database rejected or failed the statement."""
 
 
-@dataclass(frozen=True)
-class ConnInfo:
-    db_type: str
-    host: str = ""
-    port: int | None = None
-    database: str = ""
-    username: str = ""
-    password: str = ""
-    jdbc_url: str | None = None
-
-
-def ensure_driver(db_type: str) -> None:
-    normalized = (db_type or "").lower()
-    if normalized in _POSTGRES:
-        _require_module("asyncpg", "PostgreSQL requires asyncpg. Install it with: pip install 'askdata[db]'")
-    elif normalized in _MYSQL:
-        _require_module("aiomysql", "MySQL requires aiomysql. Install it with: pip install 'askdata[db]'")
-
-
-def dialect_name(db_type: str) -> str:
-    normalized = (db_type or "").lower()
-    if normalized in _MYSQL:
-        return "mysql"
-    if normalized in _POSTGRES:
-        return "postgres"
-    return "sqlite"
-
-
-def build_async_url(info: ConnInfo) -> str:
-    """Build a SQLAlchemy async URL from structured fields, else jdbc_url."""
-    if not (info.database or info.host) and info.jdbc_url:
-        return _url_from_jdbc(info.jdbc_url, info.db_type)
-    normalized = (info.db_type or "").lower()
-    if normalized in _SQLITE:
-        return _sqlite_url(info.database or ":memory:")
-    if normalized in _POSTGRES:
-        drivername = "postgresql+asyncpg"
-        default_port = 5432
-    elif normalized in _MYSQL:
-        drivername = "mysql+aiomysql"
-        default_port = 3306
-    else:
-        raise DatasourceDriverError(f"unsupported db_type: {info.db_type}")
-    url = URL.create(
-        drivername,
-        username=info.username or None,
-        password=info.password or None,
-        host=info.host or None,
-        port=info.port or default_port,
-        database=info.database or None,
-    )
-    return url.render_as_string(hide_password=False)
-
-
 async def probe_connection(info: ConnInfo) -> dict[str, Any]:
-    """Run `SELECT 1`. Connection failures return ok=false instead of raising."""
+    """Run ``SELECT 1``. Connection failures return ok=false instead of raising."""
     started = time.perf_counter()
     try:
         ensure_driver(info.db_type)
@@ -168,7 +126,7 @@ async def _execute_with_timeout(conn: Any, sql: str, timeout_seconds: int) -> An
 
 
 async def _apply_readonly_session(conn: Any, db_type: str, timeout_seconds: int) -> None:
-    normalized = (db_type or "").lower()
+    normalized = normalize_db_type(db_type)
     timeout_ms = int(timeout_seconds) * 1000
     if normalized in _SQLITE:
         await conn.exec_driver_sql("PRAGMA query_only = ON")
@@ -181,6 +139,21 @@ async def _apply_readonly_session(conn: Any, db_type: str, timeout_seconds: int)
     if normalized in _MYSQL:
         await conn.exec_driver_sql("SET SESSION TRANSACTION READ ONLY")
         await conn.exec_driver_sql(f"SET SESSION MAX_EXECUTION_TIME = {timeout_ms}")
+        return
+    if normalized in _ORACLE or normalized in _SQLSERVER:
+        await _apply_driver_timeout(conn, normalized, timeout_seconds)
+
+
+async def _apply_driver_timeout(conn: Any, db_type: str, timeout_seconds: int) -> None:
+    getter = getattr(conn, "get_raw_connection", None)
+    if getter is None:
+        return
+    try:
+        raw = await getter()
+    except (SQLAlchemyError, OSError, AttributeError, TypeError):
+        return
+    driver = getattr(raw, "driver_connection", None)
+    apply_driver_timeout(driver, db_type, timeout_seconds)
 
 
 async def _install_sqlite_progress_handler(conn: Any, timeout_seconds: int) -> None:
@@ -236,46 +209,6 @@ def _table_comment(inspector: Any, name: str) -> str | None:
     return payload.get("text")
 
 
-def _sqlite_url(path: str) -> str:
-    if path in {"", ":memory:"}:
-        return "sqlite+aiosqlite:///:memory:"
-    return URL.create("sqlite+aiosqlite", database=path).render_as_string(hide_password=False)
-
-
-def _url_from_jdbc(jdbc_url: str, db_type: str) -> str:
-    raw = jdbc_url.strip()
-    if raw.startswith("jdbc:sqlite:"):
-        return _sqlite_url(raw[len("jdbc:sqlite:") :])
-    if raw.startswith("jdbc:"):
-        raise DatasourceDriverError("jdbc_url is not a SQLAlchemy URL; set host, database, and db_type")
-    return _ensure_async_driver(raw, db_type)
-
-
-def _ensure_async_driver(url: str, db_type: str) -> str:
-    if "+aiosqlite" in url or "+asyncpg" in url or "+aiomysql" in url:
-        return url
-    normalized = (db_type or "").lower()
-    if url.startswith("sqlite"):
-        return "sqlite+aiosqlite" + url[len("sqlite") :]
-    if normalized in _POSTGRES or url.startswith("postgres"):
-        if url.startswith("postgres://"):
-            url = "postgresql://" + url[len("postgres://") :]
-        if url.startswith("postgresql://"):
-            return "postgresql+asyncpg://" + url[len("postgresql://") :]
-        if url.startswith("postgresql+"):
-            rest = url.split("://", 1)[1]
-            return "postgresql+asyncpg://" + rest
-    if (normalized in _MYSQL or url.startswith("mysql")) and "://" in url:
-        rest = url.split("://", 1)[1]
-        return "mysql+aiomysql://" + rest
-    return url
-
-
-def _require_module(module: str, message: str) -> None:
-    if importlib.util.find_spec(module) is None:
-        raise DatasourceDriverError(message)
-
-
 def _public_error(exc: Exception, info: ConnInfo) -> str:
     message = str(exc)
     if info.password:
@@ -293,3 +226,17 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
+
+
+__all__ = [
+    "ConnInfo",
+    "DatasourceDriverError",
+    "QueryExecutionError",
+    "QueryTimeoutError",
+    "build_async_url",
+    "dialect_name",
+    "ensure_driver",
+    "execute_select",
+    "introspect_schema",
+    "probe_connection",
+]

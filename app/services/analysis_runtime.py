@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,9 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models import AigcDatasource, AigcModel
+from app.security.secrets import SecretError, open_secret, seal_secret
 from app.services import sse_assembler as sse
 from app.services.catalog import build_catalog, select_requested_tables
 from app.services.chart_builder import infer_chart
+from app.services.conversation_store import ConversationStore
 from app.services.datasource_service import DatasourceService
 from app.services.llm_client import (
     LLMError,
@@ -32,6 +35,8 @@ from app.services.target_db import (
     QueryTimeoutError,
     dialect_name,
 )
+
+logger = logging.getLogger(__name__)
 
 _MAX_ROUNDS = 4
 _PREVIEW_ROWS = 20
@@ -113,7 +118,7 @@ class _ToolOutcome:
 
 
 class AnalysisRuntime:
-    """One stateless analysis turn: model tools, read-only SQL, analysis SSE."""
+    """One analysis turn: prior conversation context, model tools, read-only SQL."""
 
     def __init__(self, session: AsyncSession, llm: Any | None = None) -> None:
         self.session = session
@@ -163,26 +168,126 @@ class AnalysisRuntime:
         model_id: str | None,
         conversation_id: str | None,
     ) -> AsyncIterator[str]:
-        conversation = conversation_id or str(uuid4())
-        yield sse.message_start({"conversation_id": conversation})
         try:
             resolved, base_url, datasource, tables = await self._prepare(
                 datasource_id, question, table_names, model_id
             )
         except _TurnError as exc:
+            yield sse.message_start({"conversation_id": conversation_id or str(uuid4())})
             yield sse.error_event(exc.code, exc.message)
             yield sse.message_stop()
             return
 
+        store = ConversationStore(self.session)
+        conversation, prior = await store.open(conversation_id, datasource_id, resolved.id)
+        yield sse.message_start({"conversation_id": conversation})
         yield sse.log_delta(f"使用模型 {resolved.name}（{resolved.model}）")
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _system_prompt(dialect_name(datasource.db_type), tables)},
+            *prior,
             {"role": "user", "content": question.strip()},
         ]
         allowed = {_table_label(table) for table in tables}
         answer: list[str] = []
         produced_table = False
         nudged = False
+        try:
+            async for chunk in self._run_rounds(
+                resolved,
+                base_url,
+                messages,
+                answer,
+                datasource_id,
+                allowed,
+                tables,
+                question,
+                produced_table,
+                nudged,
+            ):
+                yield chunk
+        finally:
+            await _remember(store, conversation, question.strip(), "".join(answer))
+
+    async def _prepare(
+        self,
+        datasource_id: str,
+        question: str,
+        table_names: list[str],
+        model_id: str | None,
+    ) -> tuple[_ResolvedModel, str, AigcDatasource, list[dict[str, Any]]]:
+        if not question or not question.strip():
+            raise _TurnError("BAD_REQUEST", "question is required")
+        resolved = await self._resolve_model(model_id)
+        if (resolved.type or "chat").lower() not in _CHAT_TYPES:
+            raise _TurnError("MODEL_TYPE", f"model type {resolved.type} cannot answer questions")
+        if not resolved.api_key:
+            raise _TurnError("MODEL_CONFIG", "model api_key is empty")
+        try:
+            base_url = normalize_base_url(resolved.base_url, resolved.endpoint)
+        except LLMError as exc:
+            raise _TurnError(exc.code, str(exc)) from exc
+        datasource = await self.session.get(AigcDatasource, datasource_id)
+        if datasource is None:
+            raise _TurnError("DATASOURCE_NOT_FOUND", "datasource not found")
+        tables = select_requested_tables(datasource.structure_json, table_names)
+        if not tables:
+            raise _TurnError(
+                "NO_TABLES",
+                "没有已导入且启用的表，请先在 structureJson 中授权",
+            )
+        return resolved, base_url, datasource, tables
+
+    async def _resolve_model(self, model_id: str | None) -> _ResolvedModel:
+        if model_id:
+            row = await self.session.get(AigcModel, model_id)
+            if row is None:
+                raise _TurnError("MODEL_NOT_FOUND", "model not found")
+            if not row.enabled:
+                raise _TurnError("MODEL_DISABLED", "model is disabled")
+            return await self._materialize(row)
+        result = await self.session.execute(
+            select(AigcModel)
+            .where(AigcModel.enabled.is_(True))
+            .order_by(AigcModel.updated_at.desc(), AigcModel.created_at.desc())
+        )
+        row = result.scalars().first()
+        if row is not None:
+            return await self._materialize(row)
+        settings = self.settings
+        if settings.default_model_base_url and settings.default_model_name:
+            return _ResolvedModel(
+                id=None,
+                name=settings.default_model_name,
+                model=settings.default_model_name,
+                type="chat",
+                base_url=settings.default_model_base_url,
+                endpoint="",
+                api_key=settings.default_model_api_key,
+                temperature=0.2,
+                top_p=None,
+                max_token=None,
+            )
+        raise _TurnError("MODEL_CONFIG", "no enabled model and no default model configured")
+
+    async def _materialize(self, row: AigcModel) -> _ResolvedModel:
+        resolved, migrated = _from_row(row)
+        if migrated:
+            await self.session.commit()
+        return resolved
+
+    async def _run_rounds(
+        self,
+        resolved: _ResolvedModel,
+        base_url: str,
+        messages: list[dict[str, Any]],
+        answer: list[str],
+        datasource_id: str,
+        allowed: set[str],
+        tables: list[dict[str, Any]],
+        question: str,
+        produced_table: bool,
+        nudged: bool,
+    ) -> AsyncIterator[str]:
         for _round in range(_MAX_ROUNDS):
             turn = _ModelTurn()
             async for chunk in self._stream_model(resolved, base_url, messages, turn):
@@ -249,67 +354,6 @@ class AnalysisRuntime:
         yield sse.message_completed(content="".join(answer) or None)
         yield sse.message_stop()
 
-    async def _prepare(
-        self,
-        datasource_id: str,
-        question: str,
-        table_names: list[str],
-        model_id: str | None,
-    ) -> tuple[_ResolvedModel, str, AigcDatasource, list[dict[str, Any]]]:
-        if not question or not question.strip():
-            raise _TurnError("BAD_REQUEST", "question is required")
-        resolved = await self._resolve_model(model_id)
-        if (resolved.type or "chat").lower() not in _CHAT_TYPES:
-            raise _TurnError("MODEL_TYPE", f"model type {resolved.type} cannot answer questions")
-        if not resolved.api_key:
-            raise _TurnError("MODEL_CONFIG", "model api_key is empty")
-        try:
-            base_url = normalize_base_url(resolved.base_url, resolved.endpoint)
-        except LLMError as exc:
-            raise _TurnError(exc.code, str(exc)) from exc
-        datasource = await self.session.get(AigcDatasource, datasource_id)
-        if datasource is None:
-            raise _TurnError("DATASOURCE_NOT_FOUND", "datasource not found")
-        tables = select_requested_tables(datasource.structure_json, table_names)
-        if not tables:
-            raise _TurnError(
-                "NO_TABLES",
-                "没有已导入且启用的表，请先在 structureJson 中授权",
-            )
-        return resolved, base_url, datasource, tables
-
-    async def _resolve_model(self, model_id: str | None) -> _ResolvedModel:
-        if model_id:
-            row = await self.session.get(AigcModel, model_id)
-            if row is None:
-                raise _TurnError("MODEL_NOT_FOUND", "model not found")
-            if not row.enabled:
-                raise _TurnError("MODEL_DISABLED", "model is disabled")
-            return _from_row(row)
-        result = await self.session.execute(
-            select(AigcModel)
-            .where(AigcModel.enabled.is_(True))
-            .order_by(AigcModel.updated_at.desc(), AigcModel.created_at.desc())
-        )
-        row = result.scalars().first()
-        if row is not None:
-            return _from_row(row)
-        settings = self.settings
-        if settings.default_model_base_url and settings.default_model_name:
-            return _ResolvedModel(
-                id=None,
-                name=settings.default_model_name,
-                model=settings.default_model_name,
-                type="chat",
-                base_url=settings.default_model_base_url,
-                endpoint="",
-                api_key=settings.default_model_api_key,
-                temperature=0.2,
-                top_p=None,
-                max_token=None,
-            )
-        raise _TurnError("MODEL_CONFIG", "no enabled model and no default model configured")
-
     async def _stream_model(
         self,
         resolved: _ResolvedModel,
@@ -370,7 +414,7 @@ class AnalysisRuntime:
             )
         except QueryTimeoutError as exc:
             return _ToolOutcome([], {"message": str(exc)}, True, stop="timeout")
-        except (SqlGuardError, QueryExecutionError, DatasourceDriverError) as exc:
+        except (SqlGuardError, QueryExecutionError, DatasourceDriverError, SecretError) as exc:
             return _ToolOutcome([], {"message": str(exc)}, True)
         columns = [str(column) for column in payload.get("columns") or []]
         raw_rows = payload.get("rows") or []
@@ -403,19 +447,40 @@ class AnalysisRuntime:
         return _ToolOutcome(events, preview, False, has_table=True)
 
 
-def _from_row(row: AigcModel) -> _ResolvedModel:
-    return _ResolvedModel(
+def _from_row(row: AigcModel) -> tuple[_ResolvedModel, bool]:
+    try:
+        plain, legacy = open_secret(row.api_key or "")
+    except SecretError as exc:
+        raise _TurnError("MODEL_CONFIG", str(exc)) from exc
+    migrated = False
+    if legacy and row.api_key:
+        row.api_key = seal_secret(plain)
+        migrated = True
+    resolved = _ResolvedModel(
         id=row.id,
         name=row.name,
         model=row.model_name,
         type=row.type or "chat",
         base_url=row.base_url or "",
         endpoint=row.endpoint or "",
-        api_key=row.api_key or "",
+        api_key=plain,
         temperature=row.temperature,
         top_p=row.top_p,
         max_token=row.max_token,
     )
+    return resolved, migrated
+
+
+async def _remember(
+    store: ConversationStore,
+    conversation_id: str,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    try:
+        await store.append_turn(conversation_id, user_text, assistant_text)
+    except Exception:
+        logger.warning("failed to persist analysis turn", exc_info=True)
 
 
 def _system_prompt(dialect: str, tables: list[dict[str, Any]]) -> str:

@@ -23,6 +23,12 @@ export interface AnalysisRequest {
   conversationId?: string | null
 }
 
+export function clearConversation(conversationId: string) {
+  return request<null>(`/api/v1/core/data-analysis/conversations/${conversationId}`, {
+    method: 'DELETE',
+  })
+}
+
 export function getCatalog(datasourceId: string) {
   const query = new URLSearchParams({ datasourceId })
   return request<Catalog>(`/api/v1/core/data-analysis/catalog?${query.toString()}`)

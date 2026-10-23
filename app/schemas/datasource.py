@@ -8,7 +8,7 @@ from pydantic import AliasChoices, BaseModel, Field
 
 class DatasourceCreate(BaseModel):
     name: str
-    db_type: str = Field(description="mysql | postgres | ...")
+    db_type: str = Field(description="sqlite | mysql | postgres | oracle | sqlserver")
     host: str = ""
     port: int | None = None
     database: str = ""

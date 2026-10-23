@@ -47,8 +47,10 @@ npm run build
 - `tool.before` / `tool.executed`、`error` / `timeout`
 - 结束标记 `data: [DONE]`
 
-服务端不保存多轮历史。问数页只在当前浏览器会话里累加结果。
+服务端按 `conversationId` 保存多轮问答。问数页把这个 id 放在 `localStorage` 的 `askdata.conversation.<datasourceId>`，同一数据源的后续提问会带上它。`message.start` 里的 id 会写回本地。「新对话」清空本地 id，并调用 `DELETE /api/v1/core/data-analysis/conversations/{id}`。
+
+数据源类型包含 Oracle 和 SQL Server。Oracle 的「数据库」填服务名。可选 JDBC URL 例如 `jdbc:oracle:thin:@//host:1521/FREEPDB1`。驱动不在默认安装里，见仓库根目录 README。
 
 ## 还没做
 
-Oracle、SQL Server、密钥加密落库、服务端会话历史。模型页只做列表和编辑；更细的参数仍可用 `/docs`。
+模型页只做列表和编辑；更细的参数仍可用 `/docs`。会话历史只保留问题和助手正文，不回放工具参数。

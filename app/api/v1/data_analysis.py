@@ -5,13 +5,16 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import get_db
 from app.deps import get_analysis_runtime, get_datasource_service, require_api_key
 from app.schemas.analysis import AnalysisChatRequest
 from app.schemas.common import success
 from app.services import sse_assembler as sse
 from app.services.analysis_runtime import AnalysisRuntime
 from app.services.catalog import build_catalog
+from app.services.conversation_store import ConversationNotFoundError, ConversationStore
 from app.services.datasource_service import DatasourceNotFoundError, DatasourceService
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -55,6 +58,45 @@ async def chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, Any]:
+    item = await ConversationStore(session).get(conversation_id)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="conversation not found")
+    return success(item)
+
+
+@router.get("/conversations/{conversation_id}/messages")
+async def list_conversation_messages(
+    conversation_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, Any]:
+    try:
+        messages = await ConversationStore(session).list_messages(conversation_id)
+    except ConversationNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="conversation not found"
+        ) from None
+    return success(messages)
+
+
+@router.delete("/conversations/{conversation_id}")
+async def clear_conversation(
+    conversation_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, Any]:
+    try:
+        await ConversationStore(session).clear(conversation_id)
+    except ConversationNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="conversation not found"
+        ) from None
+    return success(None)
 
 
 @router.get("/_sse-ping")
