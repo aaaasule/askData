@@ -51,31 +51,104 @@ curl -s -H "Authorization: Bearer change-me" \
   "http://127.0.0.1:8000/api/v1/core/data-analysis/catalog?datasourceId=demo"
 ```
 
-SSE 桩（需 API Key）：
-
-```bash
-curl -N -H "X-API-Key: change-me" -H "Content-Type: application/json" \
-  -d '{"datasourceId":"demo","question":"ping","tableNames":[]}' \
-  http://127.0.0.1:8000/api/v1/core/data-analysis/chat/stream
-```
-
-## 路由一览（骨架）
+## 路由一览
 
 - ` /api/v1/datasources` — CRUD / test / introspect / structure（写入应用库）
 - ` POST /api/v1/datasources/{id}/query` — 只读 SQL（`sql_guard`：仅 SELECT/WITH、表白名单、最多约 200 行、超时约 30 秒）
-- ` /api/v1/core/data-analysis/catalog` — 读已 introspect 的 structure
-- ` /api/v1/core/data-analysis/chat/stream` — SSE（NL→SQL 仍是 stub）
-- ` /api/v1/aigc/models` — 轻量模型 CRUD（表已迁移，接口仍是 stub）
+- ` GET /api/v1/core/data-analysis/catalog?datasourceId=` — 已授权表（`structureJson` 里 imported 且 enabled）
+- ` POST /api/v1/core/data-analysis/chat/stream` — NL→SQL，OpenAI 兼容工具循环，SSE
+- ` /api/v1/aigc/models` — 轻量模型 CRUD。列表和详情里的 `api_key` 为掩码
 
-数据源口令目前明文落在应用库，生产前需要加密（见模型上的 TODO）。响应里不返回 `password`。
+`conversationId` 会回显在 `message.start` 里，本服务不保存会话。
 
-只读查询示例（先登记一个 SQLite 业务库，再把允许的表放进 `tables`）：
+## 安全
+
+问数工具 `query_data` 仍然走 `sql_guard`：只允许单条 SELECT/WITH，表必须在本次 `tableNames`（为空则用目录里已授权的表）与 `structureJson` 的交集里，行数和超时沿用 `SQL_MAX_ROWS` / `SQL_TIMEOUT_SECONDS`。
+
+**明文 TODO：** 数据源 `password` 和模型 `api_key` 仍以明文写入应用库（`aigc_datasource.password`、`aigc_model.api_key`）。响应不返回 password，模型密钥只返回掩码（例如 `sk-****1234`）。本版本没有加密落库，生产前需要补上。
+
+服务鉴权使用环境变量 `API_KEY`（`Authorization: Bearer` 或 `X-API-Key`）。未传 `modelId` 时，优先用最近更新的已启用模型；都没有时用 `DEFAULT_MODEL_BASE_URL`、`DEFAULT_MODEL_API_KEY`、`DEFAULT_MODEL_NAME`。`base_url` / `endpoint` 填 OpenAI 兼容前缀，一般以 `/v1` 结尾。
+
+## 本地问数演示
+
+下面用一份 SQLite 样例库跑通「迁移 → 建模型 → 建数据源 → 在 structureJson 里授权表 → catalog → 流式提问」。把 `change-me` 换成 `.env` 里的 `API_KEY`。模型地址和密钥换成你自己的 OpenAI 兼容服务；单元测试不需要真实密钥。
 
 ```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env
+alembic upgrade head
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+另开一个终端：
+
+```bash
+python scripts/seed_sample_sqlite.py /tmp/askdata-orders.db
+
+# 1. 登记被问数的 SQLite 库
 curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
-  -d '{"name":"biz","db_type":"sqlite","database":"/absolute/path/biz.db"}' \
+  -d '{"name":"orders","db_type":"sqlite","database":"/tmp/askdata-orders.db"}' \
   http://127.0.0.1:8000/api/v1/datasources
 
+# 2. 拉结构（introspect 会把表写成 imported=true, enabled=true）
+curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
+  -X POST http://127.0.0.1:8000/api/v1/datasources/<datasourceId>/introspect
+
+# 3. 在 structureJson 里明确授权 orders。未导入或 enabled=false 的表不会进目录，也不能被 query_data 访问。
+curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
+  -X PUT http://127.0.0.1:8000/api/v1/datasources/<datasourceId> \
+  -d '{
+    "structure_json": {
+      "tables": [{
+        "name": "orders",
+        "comment": "订单",
+        "imported": true,
+        "enabled": true,
+        "columns": [
+          {"name": "id", "type": "INTEGER"},
+          {"name": "name", "type": "TEXT"},
+          {"name": "amount", "type": "REAL"},
+          {"name": "created_at", "type": "TEXT"}
+        ]
+      }]
+    }
+  }'
+
+# 4. 登记对话模型。响应里的 api_key 是掩码
+curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
+  -d '{
+    "name": "默认对话",
+    "provider": "openai-compatible",
+    "model": "gpt-4o-mini",
+    "type": "chat",
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-your-key",
+    "temperature": 0.2,
+    "enabled": true
+  }' \
+  http://127.0.0.1:8000/api/v1/aigc/models
+
+# 5. 目录只含已授权表
+curl -s -H "X-API-Key: change-me" \
+  "http://127.0.0.1:8000/api/v1/core/data-analysis/catalog?datasourceId=<datasourceId>"
+
+# 6. 流式问数。结束标记是 data: [DONE]
+curl -N -H "X-API-Key: change-me" -H "Content-Type: application/json" \
+  -d '{
+    "datasourceId": "<datasourceId>",
+    "modelId": "<modelId>",
+    "question": "每个客户的订单金额合计是多少？",
+    "tableNames": ["orders"]
+  }' \
+  http://127.0.0.1:8000/api/v1/core/data-analysis/chat/stream
+```
+
+浏览器打开 <http://127.0.0.1:8000/demo>，填入 API Key、数据源 ID 和模型 ID 后可以直接提问。这是静态页，不是 Vue 迁移。
+
+只读查询示例（不经过模型）：
+
+```bash
 curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
   -d '{"sql":"SELECT id, name FROM orders","tables":["orders"]}' \
   http://127.0.0.1:8000/api/v1/datasources/<id>/query
@@ -92,6 +165,7 @@ curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
 | `analysis.table` | `columns`, `rows`, `row_count`, `sql`, `title`（蛇形） |
 | `analysis.echart` | `chart_type`, `option`（`series` 非空）, `title` |
 | `error` / `timeout` | `code`, `message` |
+| `message.start` / `log.delta` / `message.completed` / `message.stop` | 可选，便于对齐协议 |
 
 常量与组装函数见 `app/services/sse_assembler.py`。
 
@@ -101,7 +175,8 @@ curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
 askdata/
 ├── app/           # FastAPI 应用
 ├── alembic/       # 迁移（aigc_datasource / aigc_model）
-├── web/           # 待迁 Vue
+├── scripts/       # 样例 SQLite
+├── web/           # 静态演示页；Vue 仍待迁
 ├── pyproject.toml
 ├── .env.example
 └── README.md
@@ -113,10 +188,11 @@ askdata/
 pytest
 ```
 
+测试使用脚本化的模型客户端，不访问真实供应商，也不需要 `DEFAULT_MODEL_API_KEY`。
+
 ## 下一步
 
-1. 实现 `AnalysisRuntime` 工具循环，调用 `DatasourceService.execute_read_only_query`
-2. 落地 `aigc_model` CRUD，并在生产前加密数据源口令
-3. 迁入 `web/` Vue 页并对齐路径  
+1. 生产前加密数据源口令和模型 api_key
+2. 迁入 `web/` Vue 问数页并对齐现有 SSE
 
 可回看选型页（Cursor Page）：调研问数独立服务选型与骨架。

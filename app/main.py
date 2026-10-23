@@ -1,7 +1,10 @@
 """AskData FastAPI entrypoint."""
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import api_router
 from app.config import get_settings
@@ -26,6 +29,10 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=f"{settings.api_prefix}/v1")
+
+_demo_dir = Path(__file__).resolve().parents[1] / "web" / "demo"
+if _demo_dir.is_dir():
+    app.mount("/demo", StaticFiles(directory=_demo_dir, html=True), name="demo")
 
 
 @app.get("/health")

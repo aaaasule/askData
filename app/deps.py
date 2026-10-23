@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.db.session import get_db
 from app.security.api_key import verify_api_key
+from app.services.analysis_runtime import AnalysisRuntime
 from app.services.datasource_service import DatasourceService
 
 
@@ -33,3 +34,9 @@ def get_datasource_service(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> DatasourceService:
     return DatasourceService(session)
+
+
+def get_analysis_runtime(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> AnalysisRuntime:
+    return AnalysisRuntime(session)

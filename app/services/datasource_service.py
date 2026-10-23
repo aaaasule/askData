@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db.models import AigcDatasource
 from app.schemas.datasource import DatasourceOut
+from app.services.catalog import authorized_tables
 from app.services.sql_guard import clamp_execution_limits, prepare_read_only_sql
 from app.services.target_db import (
     ConnInfo,
@@ -158,14 +159,11 @@ class DatasourceService:
 
 def enabled_table_names(structure: dict[str, Any] | None) -> set[str]:
     """Tables marked imported and enabled inside structure_json."""
-    if not structure:
-        return set()
     names: set[str] = set()
-    for table in structure.get("tables") or []:
-        if table.get("imported", True) and table.get("enabled", True) is not False:
-            name = table.get("name")
-            if name:
-                names.add(str(name))
+    for table in authorized_tables(structure):
+        name = table.get("name") or table.get("tableName")
+        if name:
+            names.add(str(name))
     return names
 
 

@@ -10,4 +10,4 @@
 
 SSE 须对齐 `app/services/sse_assembler.py` 中的 analysis 事件（`analysis.table` / `analysis.echart` 等）。
 
-本目录目前仅占位，不包含 Vue 工程。
+本目录目前不包含 Vue 工程。`demo/index.html` 是一个无构建的静态问数页，由服务挂在 `/demo`。

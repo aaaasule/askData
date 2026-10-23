@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -29,7 +29,7 @@ class AigcDatasource(Base):
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     database: Mapped[str] = mapped_column(String(128), default="")
     username: Mapped[str] = mapped_column(String(128), default="")
-    # TODO: encrypt at rest before production
+    # TODO: encrypt at rest before production. Passwords are still plaintext.
     password: Mapped[str] = mapped_column(String(512), default="")
     jdbc_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     structure_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -50,9 +50,17 @@ class AigcModel(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     provider: Mapped[str] = mapped_column(String(64), default="openai-compatible")
-    base_url: Mapped[str] = mapped_column(String(512), default="")
-    api_key: Mapped[str] = mapped_column(String(512), default="")
+    # Upstream model id. API field name is `model` (alias `model_name`).
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    type: Mapped[str] = mapped_column(String(32), default="chat", server_default="chat")
+    base_url: Mapped[str] = mapped_column(String(512), default="")
+    endpoint: Mapped[str] = mapped_column(String(512), default="")
+    # TODO: encrypt at rest before production. Keys are masked in API responses only.
+    api_key: Mapped[str] = mapped_column(String(512), default="")
+    temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
+    top_p: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_token: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AskData 问数演示</title>
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", "PingFang SC", sans-serif; }
+    body { margin: 0; background: #f4f6f8; color: #1c2430; }
+    main { max-width: 920px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
+    p.lead { margin-top: 0; color: #526072; }
+    label { display: block; font-size: 0.85rem; margin: 12px 0 4px; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #c5ced8; border-radius: 6px; }
+    textarea { min-height: 72px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    button { background: #1769aa; color: white; border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+    button.secondary { background: #3d4d5c; }
+    pre, .card { background: white; border-radius: 8px; padding: 12px; margin-top: 16px; overflow: auto; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #e4e9ee; text-align: left; padding: 6px 8px; font-size: 0.92rem; }
+    .bar { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .bar i { display: inline-block; height: 12px; background: #1769aa; border-radius: 4px; }
+    .error { color: #a12622; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>AskData 问数演示</h1>
+    <p class="lead">本地静态页，直接调用本服务的目录和 SSE 接口。API Key 只留在浏览器里。</p>
+    <label>API 根地址</label>
+    <input id="base" />
+    <label>API Key</label>
+    <input id="apiKey" value="change-me" />
+    <label>数据源 ID</label>
+    <input id="datasourceId" placeholder="创建数据源后填入" />
+    <label>模型 ID（可空，走已启用模型或环境默认）</label>
+    <input id="modelId" />
+    <label>表名，逗号分隔（可空表示全部已授权表）</label>
+    <input id="tables" value="orders" />
+    <label>问题</label>
+    <textarea id="question">每个客户的订单金额合计是多少？</textarea>
+    <div class="row">
+      <button class="secondary" id="loadCatalog" type="button">加载目录</button>
+      <button id="ask" type="button">提问</button>
+    </div>
+    <pre id="catalog">目录尚未加载</pre>
+    <div id="answer" class="card"></div>
+    <div id="table" class="card"></div>
+    <div id="chart" class="card"></div>
+  </main>
+  <script>
+    const baseInput = document.getElementById("base");
+    baseInput.value = location.origin;
+
+    function headers() {
+      return {
+        "Content-Type": "application/json",
+        "X-API-Key": document.getElementById("apiKey").value.trim()
+      };
+    }
+
+    function root() {
+      return baseInput.value.replace(/\/$/, "");
+    }
+
+    document.getElementById("loadCatalog").onclick = async () => {
+      const box = document.getElementById("catalog");
+      const id = document.getElementById("datasourceId").value.trim();
+      box.textContent = "加载中…";
+      const response = await fetch(root() + "/api/v1/core/data-analysis/catalog?datasourceId=" + encodeURIComponent(id), { headers: headers() });
+      const body = await response.json();
+      box.textContent = JSON.stringify(body, null, 2);
+    };
+
+    document.getElementById("ask").onclick = async () => {
+      const answer = document.getElementById("answer");
+      const tableBox = document.getElementById("table");
+      const chartBox = document.getElementById("chart");
+      answer.textContent = "";
+      tableBox.innerHTML = "";
+      chartBox.innerHTML = "";
+      const tables = document.getElementById("tables").value.split(",").map((item) => item.trim()).filter(Boolean);
+      const payload = {
+        datasourceId: document.getElementById("datasourceId").value.trim(),
+        question: document.getElementById("question").value,
+        tableNames: tables,
+        modelId: document.getElementById("modelId").value.trim() || null
+      };
+      const response = await fetch(root() + "/api/v1/core/data-analysis/chat/stream", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok || !response.body) {
+        answer.innerHTML = '<p class="error">请求失败 ' + response.status + "</p>";
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const step = await reader.read();
+        if (step.done) break;
+        buffer += decoder.decode(step.value, { stream: true });
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() || "";
+        for (const block of blocks) renderBlock(block, answer, tableBox, chartBox);
+      }
+      if (buffer.trim()) renderBlock(buffer, answer, tableBox, chartBox);
+    };
+
+    function renderBlock(block, answer, tableBox, chartBox) {
+      const line = block.split("\n").find((item) => item.startsWith("data:"));
+      if (!line) return;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") return;
+      let chunk;
+      try { chunk = JSON.parse(data); } catch (error) { return; }
+      const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
+      if (!delta) return;
+      if (delta.content && delta.event && delta.event.name === "message.delta") {
+        answer.textContent += delta.content;
+      }
+      const event = delta.event || {};
+      if (event.name === "error" || event.name === "timeout") {
+        answer.innerHTML += '<p class="error">' + event.name + ": " + (event.message || "") + "</p>";
+      }
+      if (event.name === "analysis.table") renderTable(event, tableBox);
+      if (event.name === "analysis.echart") renderChart(event, chartBox);
+    }
+
+    function renderTable(event, box) {
+      const columns = event.columns || [];
+      const rows = event.rows || [];
+      let html = "<h2>" + escapeHtml(event.title || "查询结果") + "</h2>";
+      html += "<p><code>" + escapeHtml(event.sql || "") + "</code></p>";
+      html += "<table><thead><tr>" + columns.map((column) => "<th>" + escapeHtml(column) + "</th>").join("") + "</tr></thead><tbody>";
+      for (const row of rows) {
+        html += "<tr>" + row.map((cell) => "<td>" + escapeHtml(cell) + "</td>").join("") + "</tr>";
+      }
+      html += "</tbody></table>";
+      box.innerHTML = html;
+    }
+
+    function renderChart(event, box) {
+      const series = event.option && event.option.series && event.option.series[0];
+      if (!series) return;
+      const labels = (event.option.xAxis && event.option.xAxis.data) || (series.data || []).map((item) => item.name);
+      const values = series.type === "pie" ? series.data.map((item) => Number(item.value)) : (series.data || []).map(Number);
+      const max = Math.max(...values, 1);
+      let html = "<h2>" + escapeHtml(event.title || event.chart_type || "图表") + "</h2>";
+      labels.forEach((label, index) => {
+        const width = Math.max(4, Math.round((values[index] / max) * 280));
+        html += '<div class="bar"><span>' + escapeHtml(label) + "</span><i style=\"width:" + width + 'px\"></i><span>' + values[index] + "</span></div>";
+      });
+      box.innerHTML = html;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[char]));
+    }
+  </script>
+</body>
+</html>

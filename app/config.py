@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     default_model_name: str = ""
     sql_max_rows: int = 200
     sql_timeout_seconds: int = 30
+    analysis_timeout_seconds: int = 120
 
     @property
     def cors_origin_list(self) -> list[str]:
