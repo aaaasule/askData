@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class DatasourceCreate(BaseModel):
@@ -65,6 +65,20 @@ class DatasourceTestResult(BaseModel):
     ok: bool
     message: str = ""
     latency_ms: int | None = None
+
+
+class SaveStructureRequest(BaseModel):
+    """LangChat saveStructure body: structureJson string or object.
+
+    `structure_json` is accepted so callers that already use the datasource
+    update field name can hit this endpoint without a full PUT.
+    """
+
+    structure_json: dict[str, Any] | str = Field(
+        validation_alias=AliasChoices("structureJson", "structure_json"),
+    )
+
+    model_config = {"populate_by_name": True}
 
 
 class ReadOnlyQueryRequest(BaseModel):

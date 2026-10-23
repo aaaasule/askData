@@ -11,7 +11,7 @@
 | 后端 | FastAPI 重写问数层 |
 | 模型 | 自建轻量 `aigc_model` 表 |
 | 流式 | 沿用 LangChat analysis SSE（OpenAI chunk + `delta.event`） |
-| 前端 | 后续精简迁 Vue 问数/数据源页 → `web/` |
+| 前端 | Vue 3 + Vite + Naive UI，源码在 `web/`，构建后由 FastAPI 挂在 `/` |
 | 鉴权 | API Key（`Authorization: Bearer` 或 `X-API-Key`） |
 | JSON | `{ "code": "SUCCESS", "message", "data" }`；**SSE 不包这层** |
 
@@ -26,6 +26,19 @@ cp .env.example .env    # 修改 API_KEY；不要把 .env 提交进 git
 alembic upgrade head
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+前端（数据源、问数、模型）在 `web/`。构建一次后，上面的服务会在 `/` 提供页面；没构建时 `/` 会提示构建步骤，`/demo` 仍是静态演示页。
+
+```bash
+cd web
+npm install
+npm run build          # 产物在 web/dist，由 FastAPI 挂到 /
+npm run dev            # 开发：Vite 5173，把 /api 代理到 127.0.0.1:8000
+```
+
+`npm run dev` 时 API Base URL 留空。页面设置里的 API Key 存在浏览器 localStorage，请求使用 `Authorization: Bearer`。
+
+Mac 上如果用 launchd 把工作目录指到 `~/askData`，那个目录消费的是同一套仓库：同样安装 Python 依赖、执行迁移，并在 `web/` 里 `npm install && npm run build`。不要在 `~/askData` 里维护另一份前端。
 
 默认 `DATABASE_URL` 是仓库根目录下的 SQLite 文件 `askdata.db`（已在 `.gitignore`）。这是**应用库**（数据源登记、轻量模型表），不是被问数的业务库。
 
@@ -54,6 +67,7 @@ curl -s -H "Authorization: Bearer change-me" \
 ## 路由一览
 
 - ` /api/v1/datasources` — CRUD / test / introspect / structure（写入应用库）
+- ` PUT /api/v1/datasources/{id}/structure` — 只保存表授权。请求体用 LangChat 的 `structureJson`（JSON 字符串或对象），也接受 `structure_json` 对象。不改主机、库名和密码。`GET` 仍直接返回结构对象（不是字符串）
 - ` POST /api/v1/datasources/{id}/query` — 只读 SQL（`sql_guard`：仅 SELECT/WITH、表白名单、最多约 200 行、超时约 30 秒）
 - ` GET /api/v1/core/data-analysis/catalog?datasourceId=` — 已授权表（`structureJson` 里 imported 且 enabled）
 - ` POST /api/v1/core/data-analysis/chat/stream` — NL→SQL，OpenAI 兼容工具循环，SSE
@@ -95,13 +109,15 @@ curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
 curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
   -X POST http://127.0.0.1:8000/api/v1/datasources/<datasourceId>/introspect
 
-# 3. 在 structureJson 里明确授权 orders。未导入或 enabled=false 的表不会进目录，也不能被 query_data 访问。
+# 3. 只保存表授权。未导入或 enabled=false 的表不会进目录，也不能被 query_data 访问。
+#    整份数据源 PUT 仍然接受 structure_json，但改授权不必带上连接字段。
 curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
-  -X PUT http://127.0.0.1:8000/api/v1/datasources/<datasourceId> \
+  -X PUT http://127.0.0.1:8000/api/v1/datasources/<datasourceId>/structure \
   -d '{
-    "structure_json": {
+    "structureJson": {
       "tables": [{
         "name": "orders",
+        "tableName": "orders",
         "comment": "订单",
         "imported": true,
         "enabled": true,
@@ -144,7 +160,7 @@ curl -N -H "X-API-Key: change-me" -H "Content-Type: application/json" \
   http://127.0.0.1:8000/api/v1/core/data-analysis/chat/stream
 ```
 
-浏览器打开 <http://127.0.0.1:8000/demo>，填入 API Key、数据源 ID 和模型 ID 后可以直接提问。这是静态页，不是 Vue 迁移。
+浏览器打开 <http://127.0.0.1:8000/>（需已执行 `web` 下的 `npm run build`）。在设置里填写 API Key，于数据源页建库、读取表并保存授权，再在问数页提问。静态页 <http://127.0.0.1:8000/demo> 仍可直接调 SSE。
 
 只读查询示例（不经过模型）：
 
@@ -173,10 +189,10 @@ curl -s -H "X-API-Key: change-me" -H "Content-Type: application/json" \
 
 ```text
 askdata/
-├── app/           # FastAPI 应用
+├── app/           # FastAPI 应用（构建后的 Vue 挂在 /）
 ├── alembic/       # 迁移（aigc_datasource / aigc_model）
 ├── scripts/       # 样例 SQLite
-├── web/           # 静态演示页；Vue 仍待迁
+├── web/           # Vue 问数与数据源；demo/ 为静态演示
 ├── pyproject.toml
 ├── .env.example
 └── README.md
@@ -190,9 +206,16 @@ pytest
 
 测试使用脚本化的模型客户端，不访问真实供应商，也不需要 `DEFAULT_MODEL_API_KEY`。
 
+## 表授权
+
+`structure_json.tables` 里同时看 `imported` 和 `enabled`（也认 LangChat 的 `tableName`）。两者都不是 false 的表才会出现在问数目目录，并成为 `query_data` 的表白名单。缺省标志按 true 处理，所以内省结果默认全部可问。
+
+`POST /datasources/{id}/introspect` 仍会把内省快照写回 `structure_json`（表标记为 imported 且 enabled）。界面在已有授权时会把原标记合并回去，再调用 `PUT /structure` 写回，避免一次内省把勾选冲掉。
+
 ## 下一步
 
 1. 生产前加密数据源口令和模型 api_key
-2. 迁入 `web/` Vue 问数页并对齐现有 SSE
+2. Oracle / SQL Server 驱动与内省（当前只保证 sqlite、mysql/mariadb、postgres）
+3. 服务端多轮会话历史（现在 `conversationId` 只在 `message.start` 回显）
 
 可回看选型页（Cursor Page）：调研问数独立服务选型与骨架。
